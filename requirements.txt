@@ -1,0 +1,16 @@
+# Core
+torch>=2.1
+transformers>=4.40
+numpy
+matplotlib
+
+# Data preparation (build_dataset.py, only the .gbff path needs biopython)
+biopython
+
+# Stage 2 analysis
+dnachisel            # DnaChisel constraint evaluation
+# ViennaRNA          # optional: 5' MFE metric (pip install ViennaRNA)
+
+# CodonTransformer is required but installed separately (not on PyPI under this name):
+#   git clone https://github.com/Adibvafa/CodonTransformer
+#   pip install -e ./CodonTransformer

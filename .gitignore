@@ -1,0 +1,41 @@
+# --- DeepCodonOpt ---
+
+# Local-only originals (preserved on disk, not part of the clean repo)
+_legacy/
+
+# Datasets & genomes (download with build_dataset.py — see README)
+data/
+*.jsonl
+*.fna
+*.faa
+*.gbff
+*.gz
+
+# Model checkpoints (large)
+*.ckpt
+*.pt
+*.bin
+*.safetensors
+
+# Experiment outputs
+results/
+*.png
+*.svg
+
+# IDT credentials / tokens (never commit secrets)
+credentials*.json
+*idt*token*
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

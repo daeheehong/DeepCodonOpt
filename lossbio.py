@@ -43,6 +43,8 @@ from codon_utils import add_training_args, run_training
 def make_cfg(args):
     cfg = copy.deepcopy(DEFAULT_CFG)
     cfg["weights"] = dict(gc=args.lambda_gc, repeat=args.lambda_repeat, hairpin=args.lambda_hairpin)
+    cfg["gc_window"] = args.gc_window
+    cfg["gc_thr"] = args.gc_thr
     cfg["repeat"]["thr"] = args.repeat_thr
     cfg["hairpin"]["thr"] = args.hairpin_thr
     return cfg
@@ -82,8 +84,11 @@ def main():
     p.add_argument("--lambda_gc", type=float, default=1.0)
     p.add_argument("--lambda_repeat", type=float, default=1.0)
     p.add_argument("--lambda_hairpin", type=float, default=0.5)
-    p.add_argument("--repeat_thr", type=float, default=0.7, help="per-window agreement threshold")
-    p.add_argument("--hairpin_thr", type=float, default=0.7)
+    p.add_argument("--gc_thr", type=float, default=0.60,
+                   help="penalise GC fraction above this (windowed + overall)")
+    p.add_argument("--gc_window", type=int, default=100, help="window (bp) for the windowed-GC penalty")
+    p.add_argument("--repeat_thr", type=float, default=0.4, help="per-window agreement threshold")
+    p.add_argument("--hairpin_thr", type=float, default=0.4)
     args = p.parse_args()
     run_training(args, aux_loss_factory=make_aux_factory(args))
 

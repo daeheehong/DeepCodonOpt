@@ -1,0 +1,126 @@
+\documentclass{article}
+
+\usepackage[final, nonatbib]{neurips_2025}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{amsmath}
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{xcolor}         % colors
+\usepackage{graphicx}       % figures
+
+\title{Where should biological constraints enter a neural codon optimizer?}
+
+\author{%
+    Isu Kim \\ 20232068 \And
+    ... \\ ... \And
+    Daehee Hong \\ \texttt{[20252908]}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Neural codon optimizers such as CodonTransformer generate coding sequences with high host-specific codon adaptation but have no mechanism for the manufacturing constraints that real gene synthesis must satisfy. Scoring an \emph{E.\,coli}-fine-tuned CodonTransformer with the industry-standard IDT synthesis-complexity score, we find that the model achieves \emph{better-than-natural} codon usage (CAI $0.89$ vs $0.74$) yet \emph{far-worse-than-natural} synthesizability (complexity $4.9$ vs $1.9$), almost entirely because deterministic decoding produces \emph{repetitive} sequences (Overall-Repeat $24\%\!\to\!61\%$). We then ask \emph{where} constraints should be added. A training-time differentiable constraint loss \textbf{backfires}---it is minimized by flattening the codon distribution rather than fixing the sequence, so true repeats explode ($61\%\!\to\!80\%$) and CAI collapses ($0.89\!\to\!0.43$), raising complexity to $9.3$. An inference-time scheme combining temperature sampling with constraint masking \textbf{succeeds}: temperature monotonically removes repeats and traces a clean adaptation--synthesizability Pareto, while masking eliminates restriction sites and homopolymers by construction. At $T\!\approx\!0.7$--$0.8$ the outputs \emph{surpass natural genes on both axes} (complexity $1.4$--$1.6$, CAI $0.77$--$0.78$). The principle: discrete constraints belong on the discrete output at decode time, not in a differentiable training surrogate.
+\end{abstract}
+
+\section{Introduction}
+
+\textbf{Codon optimization.} The genetic code is degenerate---most amino acids are encoded by $2$--$6$ \emph{synonymous} codons that yield the same protein but differ in expression efficiency. Codon optimization chooses, for a protein $\mathbf{p}=(p_1,\dots,p_N)$, a codon at each position ($c_i\in\mathrm{Syn}(p_i)$) maximizing an expression fitness $f$ subject to discrete biological/manufacturing constraints $g_j$ (GC bounds, no repeats/hairpins, no homopolymers, no restriction sites): $\mathbf{c}^\star=\arg\max_{\mathbf c} f(\mathbf c)$ s.t. $g_j(\mathbf c)\le 0$. The difficulty is jointly handling a learned, context-dependent objective and \emph{hard discrete} constraints.
+
+\textbf{Metrics.} Manufacturability is measured by the \emph{IDT SciTools complexity score}, a vendor-grade index: for a gene it returns synthesis \emph{issues} (Overall Repeat, Hairpin, Windowed High GC, \dots) and sums their penalties (higher $=$ harder; $>7$ complex, $>20$ rejected). Its per-issue breakdown tells us \emph{why} a sequence is hard. Quality is measured by the \emph{Codon Adaptation Index} (CAI).
+
+\textbf{CodonTransformer} \cite{codontransformer} is the SOTA neural optimizer: a BigBird \cite{bigbird} masked LM trained on $>$1M sequences from 164 organisms, predicting host-adapted codons via bidirectional attention---but with \emph{no} constraint-satisfaction mechanism.
+
+\textbf{Contribution.} We (i) audit a fine-tuned CodonTransformer with the IDT breakdown, and (ii) compare \emph{where} to inject constraints: \emph{training time} (a differentiable loss, Method A) vs.\ \emph{inference time} (constrained temperature decoding, Method B). We show the training-time route is counter-productive while the inference-time route matches or beats natural sequences, and explain both outcomes.
+
+\section{Method}
+
+\textbf{Baseline.} We fine-tune CodonTransformer on the \emph{E.\,coli} subset of its corpus with the masked-LM objective ($\max_\theta \log P_\theta(\mathbf c\mid\mathbf p,o)$). To avoid homology leakage, sequences are clustered with MMseqs2 \cite{mmseqs2} and split by cluster into train/val/test $=8{:}1{:}1$. The best checkpoint is fixed and reused everywhere.
+
+\textbf{Method A: differentiable constraint loss (training time).} Following Lagrangian relaxation \cite{bertsekas}, we add a penalty to the MLM loss, $\mathcal L = L_{\mathrm{MLM}} + \lambda\sum_j w_j\,\hat g_j(P_\theta)$. As $g_j$ is discrete, we relax it on a \emph{soft-nucleotide} surrogate: the per-position codon distribution induces $N[t,n]=\sum_{c:c[t]=n}P_\theta(c\mid t)$ (expected base probability), and repeat/GC penalties are mean-field statistics of $N$ (e.g.\ self-similarity $\sum_n N[i,n]N[j,n]$). We sweep $\lambda\in\{1,3,10,30\}$.
+
+\textbf{Method B: temperature sampling $+$ constraint masking (inference time).} The trained model is unchanged; only decoding changes. (i) \emph{Temperature.} Greedy decoding emits the single most-probable codon per position, the source of repetition; we instead sample $P_T(c)\propto\exp(z_c/T)$. Higher $T$ raises entropy so near-equiprobable synonymous codons appear, breaking repeats, at the cost of occasionally choosing a less-preferred codon (lower CAI). (ii) \emph{Masking.} Before sampling we set $z_c\!\leftarrow\!-\infty$ for any codon that, with its neighbours, would form a restriction site, homopolymer, or internal Shine--Dalgarno motif, and sample from the rest; since synonymous sets are large, a compliant codon almost always remains, so the constraint is met at no quality cost.
+
+\section{Experiment}
+
+\textbf{Setup.} For $3{,}000$ held-out \emph{E.\,coli} proteins we generate a sequence per method and score it with the IDT API and CAI.
+
+\textbf{Baseline diagnosis (Table~\ref{tab:base}).} Fine-tuning helps (baseline complexity $4.9 < 6.6$ stock) and both models exceed natural CAI, yet both are far worse than natural on synthesizability ($4.9/6.6$ vs $1.9$). The breakdown pinpoints the cause: \emph{Overall Repeat} ($24\%\!\to\!61\%$). Deterministic decoding repeatedly emits each amino acid's favourite codon, maximizing CAI but yielding repetitive, low-entropy DNA---the model is \emph{over-regular}, not wrong.
+
+\begin{table}[t]
+\centering\small
+\caption{Baseline diagnosis on 3{,}000 held-out genes. Issues are \% of sequences hitting each IDT issue.}
+\label{tab:base}
+\begin{tabular}{lrrr@{\hskip 14pt}rrrr}
+\toprule
+ & complexity & \%${>}7$ & CAI & Overall & Rep.Len & Win.Rep & Win.GC \\
+ & (mean) & & & Repeat & (frag) & \% & (100) \\
+\midrule
+Natural (real)      & \textbf{1.91} & 7.0  & 0.735 & 23.7 & 1.2 & 0.5 & 4.2 \\
+Baseline (E.\,coli FT) & 4.91 & 26.0 & \textbf{0.888} & 60.8 & 3.7 & 2.3 & 14.8 \\
+Pretrained (stock)  & 6.63 & 37.9 & 0.885 & 63.9 & 3.5 & 2.6 & 30.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Method A backfires (Table~\ref{tab:methodA}).} The surrogate reaches $0$ within one epoch and all $\lambda$ give identical results, yet generated sequences worsen on every axis: complexity $4.9\!\to\!9.3$, CAI $0.89\!\to\!0.43$, rare codons $24\%$. The breakdown explains how: high-GC issues are driven to $0\%$ but Overall Repeat \emph{rises} to $79.7\%$ and repeat sub-issues quadruple. \emph{Why:} the penalty scores the probability distribution, not the emitted sequence. The model minimizes it by \emph{flattening} $P_\theta$ (spreading mass to rarer codons), which lowers mean-field self-similarity at $\approx$zero MLM cost (hence $\lambda$ is irrelevant) but, once decoded, leaves an even more repetitive sequence with poor codon usage. Training objective (soft) and true objective (discrete) are \emph{misaligned}.
+
+\begin{table}[t]
+\centering\small
+\caption{Method A (constraint loss). Right block: \% hitting each IDT issue.}
+\label{tab:methodA}
+\begin{tabular}{lrrr@{\hskip 14pt}rrrr}
+\toprule
+ & complexity & \%${>}20$ & CAI & Overall & Rep.Len & Win.Rep & Win.GC \\
+ & (mean) & & & Repeat & (frag) & \% & (100) \\
+\midrule
+Natural (real)   & 1.91 & 0.6  & 0.735 & 23.7 & 1.2 & 0.5 & 4.2 \\
+Baseline (FT)    & 4.91 & 2.5  & 0.888 & 60.8 & 3.7 & 2.3 & 14.8 \\
+\textbf{Method A} & \textbf{9.32} & \textbf{13.7} & \textbf{0.426} & \textbf{79.7} & \textbf{12.3} & \textbf{12.7} & \textbf{0.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Method B succeeds (Fig.~\ref{fig:b}, Table~\ref{tab:methodB}).} Sweeping $T$ traces a clean Pareto: complexity falls monotonically ($4.58\!\to\!1.18$) as CAI declines ($0.882\!\to\!0.748$). The \emph{knee} is $T\!\approx\!0.7$--$0.8$, where Method B \emph{beats natural on both axes} ($T{=}0.7$: complexity $1.59<1.91$, CAI $0.781>0.735$). The per-temperature breakdown shows all four issues converging to natural levels; by $T{=}0.7$--$0.8$ the three repeat issues are already \emph{below} natural, and only Windowed-High-GC ($8.2/7.4$, down from $14.8$) stays slightly above natural ($4.2$). A greedy ($T{=}0$, masking-only) control keeps complexity at the baseline $\approx4.9$: masking cannot break long-range repeats, so \emph{temperature is the driver and masking is the guarantee} for local motifs. \emph{Why it works:} the mask is an indicator on the discrete sequence (exact, ungameable), and temperature changes the \emph{realized} codons, so it genuinely reduces the repeats IDT measures---the same intuition as Method A, but applied to the output rather than to a decoupled soft distribution.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.49\linewidth]{figs/fig5_pareto.png}
+\includegraphics[width=0.49\linewidth]{figs/fig5_issues.png}
+\caption{Method B. \emph{Left:} CAI vs.\ IDT complexity along temperature ($\star$ $=$ natural); the curve passes above/left of natural at $T\!\approx\!0.7$--$0.8$. \emph{Right:} the four IDT issues vs.\ temperature (dashed $=$ natural).}
+\label{fig:b}
+\end{figure}
+
+\begin{table}[t]
+\centering\small
+\caption{Method B vs.\ temperature ($3{,}000$ genes). Issues are \% hitting each IDT issue.}
+\label{tab:methodB}
+\begin{tabular}{lrr@{\hskip 14pt}rrrr}
+\toprule
+$T$ & CAI & complexity & Overall Repeat & Rep.Len (frag) & Win.Rep \% & Win.GC (100) \\
+\midrule
+real & 0.735 & 1.91 & 23.7 & 1.2 & 0.5 & 4.2 \\
+0.3  & 0.850 & 3.22 & 35.8 & 1.7 & 0.9 & 10.7 \\
+0.5  & 0.812 & 2.20 & 32.6 & 1.0 & 0.7 & 10.1 \\
+\textbf{0.7} & \textbf{0.781} & \textbf{1.59} & 23.9 & 0.9 & 0.5 & 8.2 \\
+\textbf{0.8} & \textbf{0.767} & \textbf{1.41} & 21.3 & 0.8 & 0.4 & 7.4 \\
+1.0  & 0.748 & 1.18 & 17.4 & 0.6 & 0.4 & 5.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Conclusion}
+
+We asked \emph{where} biological constraints should enter a neural codon optimizer. A fine-tuned CodonTransformer is over-regular and thus hard to synthesize. Injecting constraints as a \emph{training loss} (Method A) backfires: the differentiable surrogate scores the model's probabilities, which the model satisfies by flattening its distribution rather than fixing its output, worsening both synthesizability ($4.9\!\to\!9.3$) and codon usage. Injecting them at \emph{inference} (Method B)---masking violating codons and sampling at temperature---succeeds, surpassing natural sequences on synthesizability while keeping higher codon adaptation. \textbf{Discrete constraints belong on the discrete output at decode time, not in a differentiable surrogate over model probabilities.} \emph{Future work:} (i) look-ahead/beam constrained decoding \cite{neurologic} to remove long-range repeats directly; (ii) multi-position masks for residual Shine--Dalgarno motifs; (iii) per-sequence automatic $T$ to hit a target IDT score. Code: \url{https://github.com/daeheehong/DeepCodonOpt}; checkpoint: \url{https://doi.org/10.5281/zenodo.20602294}.
+
+\newpage
+\bibliographystyle{splncs04}
+\bibliography{reference}
+
+\end{document}

@@ -97,8 +97,7 @@ def gc_window_loss(nuc, win, hi):
     if T < win:
         return nuc.sum() * 0.0
     gc = (nuc[:, 1] + nuc[:, 2]).view(1, 1, -1)          # G+C probability, [1,1,T]
-    k = torch.ones(1, 1, win, device=nuc.device) / win
-    m = F.conv1d(gc, k).view(-1)                         # windowed mean GC
+    m = F.avg_pool1d(gc, win, stride=1).view(-1)         # windowed mean GC (avg_pool avoids cuDNN)
     return F.relu(m - hi).pow(2).mean()
 
 
@@ -110,12 +109,11 @@ def repeat_loss(nuc, kmer=8, min_lag=3, max_lag=80, thr=0.6):
     if T < kmer + min_lag:
         return nuc.sum() * 0.0
     total = nuc.sum() * 0.0
-    k = torch.ones(1, 1, kmer, device=nuc.device) / kmer
     for d in range(min_lag, min(max_lag, T - 1) + 1):
         m = (nuc[:-d] * nuc[d:]).sum(-1)                 # per-position agreement [T-d] in [0,1]
         if m.numel() < kmer:
             continue
-        win_id = F.conv1d(m.view(1, 1, -1), k).view(-1)  # mean agreement over a k-mer
+        win_id = F.avg_pool1d(m.view(1, 1, -1), kmer, stride=1).view(-1)  # k-mer mean (no cuDNN)
         total = total + F.relu(win_id - thr).pow(2).sum()
     return total / T                                     # per-base normalisation
 
@@ -150,10 +148,10 @@ def hairpin_loss(nuc, stem=11, min_loop=3, max_span=70, thr=0.6):
 # IDT issue -> loss mapping. Thresholds (thr/hi) sit near natural levels so the loss only
 # fires on genuinely problematic windows. ``weights`` are the lambda knobs (Pareto handle).
 DEFAULT_CFG = dict(
-    gc_windows=[(100, 0.65), (30, 0.90)],     # Windowed High GC (100bp), (30bp)
-    gc_overall=(800, 0.60),                    # Overall High GC (fragment)
-    repeat=dict(kmer=8, min_lag=3, max_lag=80, thr=0.7),
-    hairpin=dict(stem=11, min_loop=3, max_span=70, thr=0.7),
+    gc_window=100,                             # window (bp) for the windowed high-GC penalty
+    gc_thr=0.60,                               # penalise GC fraction above this (windowed + overall)
+    repeat=dict(kmer=8, min_lag=3, max_lag=80, thr=0.4),
+    hairpin=dict(stem=11, min_loop=3, max_span=70, thr=0.4),
     weights=dict(gc=1.0, repeat=1.0, hairpin=0.5),
 )
 
@@ -175,11 +173,8 @@ def manufacturability_loss(logits, query_ids, attn_mask, codon_cols, codon_nuc,
         nuc = soft_nuc_one(logits[b], is_codon_pos, codon_cols, codon_nuc)
         if nuc.shape[0] < 12:
             continue
-        gc = nuc.sum() * 0.0
-        for win, hi in cfg["gc_windows"]:
-            gc = gc + gc_window_loss(nuc, win, hi)
-        ow, oh = cfg["gc_overall"]
-        gc = gc + gc_window_loss(nuc, min(ow, nuc.shape[0]), oh)
+        gc = gc_window_loss(nuc, cfg["gc_window"], cfg["gc_thr"])          # windowed high GC
+        gc = gc + gc_window_loss(nuc, nuc.shape[0], cfg["gc_thr"])         # overall high GC (whole CDS)
         comp["gc"] = comp["gc"] + gc
         comp["repeat"] = comp["repeat"] + repeat_loss(nuc, **cfg["repeat"])
         comp["hairpin"] = comp["hairpin"] + hairpin_loss(nuc, **cfg["hairpin"])

@@ -73,9 +73,15 @@ def enable_tf32():
 
 
 def wrap_ddp(model, local_rank):
-    # static_graph=True: handles unused params (pooler), is compatible with gradient
-    # checkpointing, and is faster than find_unused_parameters for a fixed graph.
-    return DDP(model, device_ids=[local_rank], output_device=local_rank, static_graph=True)
+    # static_graph=True: handles unused params (pooler), compatible with gradient
+    #   checkpointing, faster than find_unused_parameters for a fixed graph.
+    # broadcast_buffers=False: REQUIRED for Stage 3's two forwards per step. With the default
+    #   (True) DDP copies buffers in-place before every forward, so the second forward bumps the
+    #   position_ids buffer that the first forward's backward still needs -> "variable modified by
+    #   an inplace operation". The buffers here are deterministic (arange), so skipping the
+    #   broadcast is safe; harmless for Stage 1 (single forward) too.
+    return DDP(model, device_ids=[local_rank], output_device=local_rank,
+               static_graph=True, broadcast_buffers=False)
 
 
 # ============================================================================
@@ -447,6 +453,13 @@ def run_training(args, aux_loss_factory=None):
             if patience_ctr >= args.patience:
                 log("  -> early stopping")
                 break
+
+    # Save the final-epoch weights too. For constraint-aware fine-tuning (Stage 3) the two
+    # checkpoints bracket the quality/constraint trade-off: best.pt = best val-MLM (least
+    # constrained), last.pt = final epoch (most constraint applied). Validate both with analyze.py.
+    if is_main:
+        torch.save(core.state_dict(), os.path.join(args.checkpoint_dir, "last.pt"))
+        log(f"  -> saved final-epoch checkpoint {os.path.join(args.checkpoint_dir, 'last.pt')}")
 
     # --- test on best checkpoint ---
     if is_ddp:

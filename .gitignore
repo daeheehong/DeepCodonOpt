@@ -1,9 +1,10 @@
 # --- DeepCodonOpt ---
 
-# Local-only originals (preserved on disk, not part of the clean repo)
+# Local-only originals and raw experiment outputs (archived to Zenodo, not committed)
 _legacy/
+_result/
 
-# Datasets & genomes (download with build_dataset.py — see README)
+# Datasets & genomes (download / build with build_dataset.py — see README)
 data/
 *.jsonl
 *.fna
@@ -11,14 +12,16 @@ data/
 *.gbff
 *.gz
 
-# Model checkpoints (large)
+# Model checkpoints (large -> Zenodo)
 *.ckpt
 *.pt
 *.bin
 *.safetensors
 
-# Experiment outputs
+# Generated outputs / figures (regenerate with make_report_figs.py)
 results/
+output/
+report_figs/
 *.png
 *.svg
 
@@ -26,6 +29,16 @@ results/
 credentials*.json
 *idt*token*
 .env
+
+# LaTeX build artifacts
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.pdf
+paper/*.synctex.gz
+paper/figs/
 
 # Python
 __pycache__/

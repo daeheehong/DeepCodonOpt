@@ -41,7 +41,20 @@ import matplotlib.pyplot as plt
 import codon_utils as cu
 
 COLUMNS = ["real", "baseline", "pretrained"]      # comparison columns (pretrained optional)
-COLORS = {"real": "#4C72B0", "baseline": "#C44E52", "pretrained": "#55A868"}
+COLORS = {"real": "#4C72B0", "baseline": "#C44E52", "pretrained": "#55A868",
+          "unconstrained": "#C44E52", "constrained": "#8172B3"}
+
+
+def _ref_target(cols):
+    """Reference column (natural sequence) and the column of interest, for sorting tables."""
+    ref = "real" if "real" in cols else cols[0]
+    rest = [c for c in cols if c != ref]
+    if not rest:
+        return ref, ref
+    for pref in ("constrained", "baseline"):           # the model column we most want to see
+        if pref in rest:
+            return ref, pref
+    return ref, rest[-1]
 
 
 # ============================================================================
@@ -220,8 +233,9 @@ def run_dnachisel(args, seqs, cols, out_dir, codon_usage):
 
     rate = lambda d: (d["viol"] / d["n"]) if d["n"] else float("nan")
     summary = [{"constraint": n, **{f"{c}_viol_rate": rate(agg[n][c]) for c in cols}} for n in names]
-    # sort by how much the baseline exceeds real (the Stage-3 loss priority)
-    summary.sort(key=lambda s: (s.get("baseline_viol_rate", 0) - s.get("real_viol_rate", 0)), reverse=True)
+    ref, tgt = _ref_target(cols)
+    # sort by how much the model column of interest exceeds the natural reference
+    summary.sort(key=lambda s: (s.get(f"{tgt}_viol_rate", 0) - s.get(f"{ref}_viol_rate", 0)), reverse=True)
     path = os.path.join(out_dir, "violations_summary.csv")
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(summary[0].keys()))
@@ -244,7 +258,7 @@ def run_dnachisel(args, seqs, cols, out_dir, codon_usage):
     plt.savefig(os.path.join(out_dir, "violations.png"), dpi=150, bbox_inches="tight")
 
     print("\n" + "=" * 70)
-    print("DnaChisel violation rate (%)  [sorted by baseline - real]")
+    print(f"DnaChisel violation rate (%)  [sorted by {tgt} - {ref}]")
     print(f'{"constraint":>22}' + "".join(f"{c:>12}" for c in cols))
     for s in summary:
         print(f'{s["constraint"]:>22}' + "".join(
@@ -344,9 +358,10 @@ def _idt_issue_breakdown(cols, col_scores, n, out_dir):
         w.writerow(["idt_issue"] + [f"{c}_pct" for c in cols])
         for nm in names:
             w.writerow([nm] + [f"{100.0 * pct[c].get(nm, 0) / max(n, 1):.1f}" for c in cols])
+    _, tgt = _ref_target(cols)
     print("\n[IDT issues: % of sequences hitting each]")
     print(f'{"idt_issue":>26}' + "".join(f"{c:>12}" for c in cols))
-    for nm in sorted(names, key=lambda nm: pct.get("baseline", {}).get(nm, 0), reverse=True)[:12]:
+    for nm in sorted(names, key=lambda nm: pct.get(tgt, {}).get(nm, 0), reverse=True)[:12]:
         print(f"{nm:>26}" + "".join(f'{100.0*pct[c].get(nm,0)/max(n,1):>11.1f}' for c in cols))
 
 
@@ -355,7 +370,9 @@ def _idt_issue_breakdown(cols, col_scores, n, out_dir):
 # ============================================================================
 def parse_args():
     p = argparse.ArgumentParser(description="Stage 2: violation analysis (baseline vs pretrained)")
-    p.add_argument("--baseline_checkpoint", required=True, help="raw state_dict from baseline.py")
+    p.add_argument("--baseline_checkpoint", default=None, help="raw state_dict from baseline.py")
+    p.add_argument("--sequences", default=None,
+                   help="score a pre-generated sequences.csv (e.g. decodebio.py output) and skip generation")
     p.add_argument("--data", default="data/test.jsonl")
     p.add_argument("--n", type=int, default=500, help="number of proteins to evaluate (0 = all)")
     p.add_argument("--out_dir", default="results")
@@ -386,29 +403,47 @@ def parse_args():
     return p.parse_args()
 
 
+def load_sequences_csv(path):
+    """Read a sequences.csv (seq_id + one *_dna column per model) -> ({col: [dna]}, cols)."""
+    rows = list(csv.DictReader(open(path)))
+    headers = [h for h in rows[0].keys() if h != "seq_id"] if rows else []
+    cols = [h[:-4] if h.endswith("_dna") else h for h in headers]
+    seqs = {c: [] for c in cols}
+    for r in rows:
+        for h, c in zip(headers, cols):
+            seqs[c].append((r.get(h) or "").strip().upper().replace("U", "T"))
+    return seqs, cols
+
+
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
-    import torch
-    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"[setup] device={device} baseline={args.baseline_checkpoint}", flush=True)
 
-    data = cu.load_eval_dataset(args.data, args.n, args.seed)
-    print(f"[data] {len(data)} sequences from {args.data}", flush=True)
-    if not data:
-        sys.exit("no data / bad codons format")
-
-    seqs, _ = generate_columns(args, data, device)
-    cols = [c for c in COLUMNS if c in seqs]
-    if not seqs["baseline"]:
-        sys.exit("no sequences generated")
-
-    with open(os.path.join(args.out_dir, "sequences.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["seq_id"] + [f"{c}_dna" for c in cols])
-        for i in range(len(seqs["baseline"])):
-            w.writerow([i] + [seqs[c][i] for c in cols])
-    print(f"[dump] sequences.csv ({len(seqs['baseline'])} rows, cols={cols})", flush=True)
+    if args.sequences:                                   # score a pre-generated CSV (Method C etc.)
+        seqs, cols = load_sequences_csv(args.sequences)
+        if not seqs or not seqs[cols[0]]:
+            sys.exit(f"no sequences in {args.sequences}")
+        print(f"[sequences] {len(seqs[cols[0]])} rows from {args.sequences}, cols={cols}", flush=True)
+    else:
+        if not args.baseline_checkpoint:
+            sys.exit("provide --baseline_checkpoint (to generate) or --sequences (to score a CSV)")
+        import torch
+        device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        print(f"[setup] device={device} baseline={args.baseline_checkpoint}", flush=True)
+        data = cu.load_eval_dataset(args.data, args.n, args.seed)
+        print(f"[data] {len(data)} sequences from {args.data}", flush=True)
+        if not data:
+            sys.exit("no data / bad codons format")
+        seqs, _ = generate_columns(args, data, device)
+        cols = [c for c in COLUMNS if c in seqs]
+        if not seqs["baseline"]:
+            sys.exit("no sequences generated")
+        with open(os.path.join(args.out_dir, "sequences.csv"), "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["seq_id"] + [f"{c}_dna" for c in cols])
+            for i in range(len(seqs["baseline"])):
+                w.writerow([i] + [seqs[c][i] for c in cols])
+        print(f"[dump] sequences.csv ({len(seqs['baseline'])} rows, cols={cols})", flush=True)
 
     # codon usage table for DnaChisel rare codons (aa -> {codon: freq})
     usage = None
@@ -432,7 +467,8 @@ def main():
         except Exception as e:
             print(f"[dnachisel] skipped: {e}", flush=True)
 
-    ctx = build_metrics_context(seqs["real"], args.codon_usage, args.mfe_window)
+    ref_real = seqs["real"] if "real" in seqs else seqs[cols[0]]
+    ctx = build_metrics_context(ref_real, args.codon_usage, args.mfe_window)
     run_metrics(seqs, cols, args.out_dir, ctx)
 
     if args.idt_credentials:
